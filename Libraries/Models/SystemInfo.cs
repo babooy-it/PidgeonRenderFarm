@@ -1,6 +1,6 @@
 ﻿namespace Libraries.Models;
 
-public class SystemInfo
+public class SystemInfo : SavableObject
 {
     public string PRF_Version { get; set; }
     public string OS_Description { get; set; }
@@ -10,7 +10,7 @@ public class SystemInfo
     public int GPU_Count { get; set; }
     public int RAM { get; set; }
 
-    public SystemInfo(bool allow_collection, string bin_directory)
+    public SystemInfo(bool allow_collection)
     {
         if (allow_collection)
         {
@@ -33,6 +33,6 @@ public class SystemInfo
             RAM = 0;
         }
 
-        FileHandler.Save_SystemInfo(Path.Join(bin_directory, "SystemInfo.json"), this);
+        FileHandler.Save_Object(this);
     }
 }

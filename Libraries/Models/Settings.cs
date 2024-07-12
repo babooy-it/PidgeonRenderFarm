@@ -2,7 +2,7 @@
 
 namespace Libraries.Models;
 
-public class Settings
+public class Settings : SavableObject
 {
     public List<Blender> Blender_Installations { get; set; }
     public bool Allow_Data_Collection { get; set; }

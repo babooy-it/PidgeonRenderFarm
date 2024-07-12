@@ -4,11 +4,13 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
-
 using Libraries;
+using Libraries.Enums;
 using Libraries.Models;
 using Libraries.Models.Database;
-using Libraries.Enums;
+using LinqToDB;
+
+namespace Master;
 
 class Master
 {
@@ -27,8 +29,6 @@ class Master
 
     public static WebClient Web_Client;
 
-    private static SettingsFileHandler Settings_File_Handler;
-
     private static bool Using_SRF = false;
     #endregion
 
@@ -40,11 +40,11 @@ class Master
     }
     public void Start(string[] args)
     {
-        Settings_File_Handler = new SettingsFileHandler(Path.Join(Bin_Directory, "master_settings.json"));
+        FileHandler.Bin_Directory = Bin_Directory;
 
         try
         {
-            Settings = Settings_File_Handler.Load_Master_Settings(Path.Join(Bin_Directory, "master_settings_override.json"));
+            Settings = FileHandler.Load_To_Object<MasterSettings>(Path.Join(Bin_Directory, "master_settings_override.json"));
             if (string.IsNullOrWhiteSpace(Settings.Database_Connection.Path))
             {
                 Settings.Database_Connection.Path = Path.Join(Bin_Directory, "Database");
@@ -55,7 +55,8 @@ class Master
         {
             try
             {
-                Settings = Settings_File_Handler.Load_Master_Settings();
+                Settings = new();
+                Settings = FileHandler.Load_To_Object<MasterSettings>(Path.Join(Bin_Directory, Settings.GetType().Name + ".json"));
             }
             catch (FileNotFoundException)
             {
@@ -78,20 +79,26 @@ class Master
         }
 
         // Initialize static classes
-        ProjectFileHandler.Bin_Directory = Bin_Directory;
         Logger.Initialize(Settings.Enable_Logging, Settings.Log_level);
 
         if (!Directory.Exists(Settings.Database_Connection.Path))
         {
             Directory.CreateDirectory(Settings.Database_Connection.Path);
         }
-        DBHandler.Initialize(Settings.Database_Connection);
 
-        new SystemInfo(Settings.Allow_Data_Collection, Bin_Directory);
+        using (DatabaseHandler db = new DatabaseHandler(
+                   new DataOptions()
+                       .UseSQLite($"Data Source={Path.Join(Settings.Database_Connection.Path, "PRF.db")}")))
+        {
+            db.Initialize_Database();
+        }
+
+        new SystemInfo(Settings.Allow_Data_Collection);
 
         try
         {
-            (Project, Project_Directory) = ProjectFileHandler.Load_Project(Path.Join(Bin_Directory, "startup_project.prfp"));
+            Project = FileHandler.Load_To_Object<Project>(Path.Join(Bin_Directory, "startup_project.prfp"));
+            Project_Directory = Path.Join(Bin_Directory, Project.ID);
             Using_SRF = true;
             File.Delete(Path.Join(Bin_Directory, "startup_project.prfp"));
             Directory.CreateDirectory(Project_Directory);
@@ -154,8 +161,13 @@ class Master
                 try
                 {
                     // Load the project from the given file
-                    (Project, Project_Directory) = ProjectFileHandler.Load_Project(user_input);
-                    DBHandler.Initialize_Project_Table(Project.ID, true);
+                    Project = FileHandler.Load_To_Object<Project>(user_input);
+                    Project_Directory = Path.Join(Bin_Directory, Project.ID);
+                    using (DatabaseHandler db = new DatabaseHandler())
+                    {
+                        DatabaseHandler.Project_ID = Project.ID;
+                        db.Initialize_Database();
+                    }
                     // Render project
                     Render_Project();
                 }
@@ -203,21 +215,13 @@ class Master
         Console.Clear();
         Progress_Bar = new ProgressBar(Project.Frames_Total, "Rendering: ");
 
-        IPAddress ip_address;
-        if (string.IsNullOrWhiteSpace(Settings.IPv4_Overwrite))
-        {
-            // Get the local IPv4 of device
-            ip_address = Helpers.Get_IPv4();
-        }
-        else
-        {
-            ip_address = IPAddress.Parse(Settings.IPv4_Overwrite);
-        }
+        // Get the local IPv4 of device
+        IPAddress ip_address = string.IsNullOrWhiteSpace(Settings.IPv4_Overwrite) ? Helpers.Get_IPv4() : IPAddress.Parse(Settings.IPv4_Overwrite);
 
         Logger.Log(this, "Master IPv4: " + ip_address.ToString(), silenced:true);
         
         Display.Show_Top_Bar("Master", new List<string> { $"Master IP address: {ip_address}",
-                                                          $"Master Port: {Settings.Port}" });
+            $"Master Port: {Settings.Port}" });
 
         List<Thread> threads = new List<Thread>();
 
@@ -273,7 +277,10 @@ class Master
 
                 lock (Project_DB_Lock)
                 {
-                    frames_pending = DBHandler.Select_Frames_Table_All_Pending().Count;
+                    using (DatabaseHandler db = new DatabaseHandler())
+                    {
+                        frames_pending = db.Select_Frames(state: FrameState.Rendering).Count;
+                    }
                     Logger.Log(this, "Frames pending: " + frames_pending);
 
                     Progress_Bar.Update(frames_pending, true);
@@ -298,8 +305,8 @@ class Master
             Process process = new Process();
             // Set Blender as executable
             process.StartInfo.FileName = Settings.Blender_Installations.FirstOrDefault(blender =>
-                                blender.Version.Split('.')[0] == Project.Blender_Version.Split('.')[0]
-                                && blender.Version.Split('.')[1] == Project.Blender_Version.Split('.')[1]).Executable;
+                blender.Version.Split('.')[0] == Project.Blender_Version.Split('.')[0]
+                && blender.Version.Split('.')[1] == Project.Blender_Version.Split('.')[1]).Executable;
             // Use the command string as args
             process.StartInfo.Arguments = args;
             process.StartInfo.CreateNoWindow = true;
@@ -433,7 +440,10 @@ class Master
                 {
                     lock (Project_DB_Lock)
                     {
-                        DBHandler.Update_Frames_Table(faulty_frames);
+                        using (DatabaseHandler db = new DatabaseHandler())
+                        {
+                            db.Update_Frames(faulty_frames);
+                        }
                     }
 
                     client_response.Frames.RemoveAll(frame => faulty_frames.Contains(frame));
@@ -446,7 +456,7 @@ class Master
                 {
                     // If not all frames are faulty
                     if (faulty_frames.Count != client_response.Frames.Count &&
-                    Project.File_transfer_Mode == FileTransferMode.TCP)
+                        Project.File_transfer_Mode == FileTransferMode.TCP)
                     {
                         // Send a message to the Client to syncronize
                         byte[] bytes_send = Encoding.UTF8.GetBytes("drop");
@@ -464,7 +474,7 @@ class Master
                     }
 
                     else if (faulty_frames.Count != client_response.Frames.Count &&
-                        Project.File_transfer_Mode == FileTransferMode.SMB)
+                             Project.File_transfer_Mode == FileTransferMode.SMB)
                     {
                         string remote_path = Path.Join(Settings.SMB_Connection.Connection_String, Project_Directory, zip_file);
                         if (Project.Download_Remote_Input)
@@ -481,7 +491,7 @@ class Master
                     }
 
                     else if (faulty_frames.Count != client_response.Frames.Count &&
-                        Project.File_transfer_Mode == FileTransferMode.FTP)
+                             Project.File_transfer_Mode == FileTransferMode.FTP)
                     {
                         string remote_path = Path.Join(Settings.FTP_Connection.Connection_String, Project_Directory, zip_file);
 
@@ -555,13 +565,16 @@ class Master
                 faulty_frames.Add(new Frame
                 {
                     Id = frame.Id,
-                    State = "Open"
+                    State = FrameState.Open
                 });
             }
 
             lock (Project_DB_Lock)
             {
-                DBHandler.Update_Frames_Table(faulty_frames);
+                using (DatabaseHandler db = new DatabaseHandler())
+                {
+                    db.Update_Frames(faulty_frames);
+                }
             }
 
             return;
@@ -584,13 +597,16 @@ class Master
                     faulty_frames.Add(new Frame
                     {
                         Id = frame.Id,
-                        State = "Open"
+                        State = FrameState.Open
                     });
                 }
 
                 lock (Project_DB_Lock)
                 {
-                    DBHandler.Update_Frames_Table(faulty_frames);
+                    using (DatabaseHandler db = new DatabaseHandler())
+                    {
+                        db.Update_Frames(faulty_frames);
+                    }
                 }
 
                 return;
@@ -624,7 +640,7 @@ class Master
                 valid_frames.Add(new Frame
                 {
                     Id = frame.Id,
-                    State = "Rendered"
+                    State = FrameState.Rendered
                 });
             }
 
@@ -633,13 +649,16 @@ class Master
                 faulty_frames.Add(new Frame
                 {
                     Id = frame.Id,
-                    State = "Open"
+                    State = FrameState.Open
                 }); ;
             }
         }
-        
-        DBHandler.Update_Frames_Table(valid_frames);
-        DBHandler.Update_Frames_Table(faulty_frames);
+
+        using (DatabaseHandler db = new DatabaseHandler())
+        {
+            db.Update_Frames(valid_frames);
+            db.Update_Frames(faulty_frames);
+        }
 
         Logger.Log(this, $"Frame {frames.First().Id} - {frames.Last().Id} rendered!");
     }
@@ -650,17 +669,26 @@ class Master
         List<Frame> old_frames = new List<Frame>();
         lock (Project_DB_Lock)
         {
-            old_frames = DBHandler.Select_Assigned_Frames_Table(ipv4);
+            using (DatabaseHandler db = new DatabaseHandler())
+            {
+                old_frames = db.Select_Frames_Assigned(ipv4);
+            }
         }
         
         if (old_frames.Count > 0)
         {
             foreach (Frame frame in old_frames)
             {
-                frame.State = "Open";
+                frame.State = FrameState.Open;
             }
 
-            DBHandler.Update_Frames_Table(old_frames);
+            lock (Project_DB_Lock)
+            {
+                using (DatabaseHandler db = new DatabaseHandler())
+                {
+                    db.Update_Frames(old_frames);
+                }
+            }
         }
 
         // Have an empty list ready
@@ -668,8 +696,8 @@ class Master
         // If Client Blender version does not match
         // Don't give him frames
         List<Blender> tmp = requirements.Blender_Installations.Where(blender =>
-                                blender.Version.Split('.')[0] == Project.Blender_Version.Split('.')[0]
-                                && blender.Version.Split('.')[1] == Project.Blender_Version.Split('.')[1]).ToList();
+            blender.Version.Split('.')[0] == Project.Blender_Version.Split('.')[0]
+            && blender.Version.Split('.')[1] == Project.Blender_Version.Split('.')[1]).ToList();
 
         if (tmp.Count == 0)
         {
@@ -717,40 +745,43 @@ class Master
         // Make sure to only change a thing at once
         lock (Project_DB_Lock)
         {
-            List<Frame> frames = DBHandler.Select_Frames_Table(Project.Batch_Size);
-
-            if (frames.Count == 0)
+            using (DatabaseHandler db = new DatabaseHandler())
             {
-                reason = "No open frames";
-                return empty_list;
-            }
+                List<Frame> frames = db.Select_Frames(Project.Batch_Size);
 
-            // Create a list with frames for Client
-            List<Frame> frames_picked = new List<Frame>();
-
-            int next_frame = frames[0].Id;
-            foreach (Frame frame in frames)
-            {
-                if (frame.Id == next_frame)
+                if (frames.Count == 0)
                 {
-                    frames_picked.Add(new Frame
+                    reason = "No open frames";
+                    return empty_list;
+                }
+
+                // Create a list with frames for Client
+                List<Frame> frames_picked = new List<Frame>();
+
+                int next_frame = frames[0].Id;
+                foreach (Frame frame in frames)
+                {
+                    if (frame.Id == next_frame)
                     {
-                        Id = frame.Id,
-                        State = "Rendering",
-                        IPv4 = ipv4
-                    });
-                    next_frame = frame.Id + 1;
+                        frames_picked.Add(new Frame
+                        {
+                            Id = frame.Id,
+                            State = FrameState.Rendering,
+                            IPv4 = ipv4
+                        });
+                        next_frame = frame.Id + 1;
+                    }
+                    else
+                    {
+                        break;
+                    }
                 }
-                else
-                {
-                    break;
-                }
+
+                db.Update_Frames(frames_picked);
+
+                reason = "";
+                return frames_picked;
             }
-
-            DBHandler.Update_Frames_Table(frames_picked);
-
-            reason = "";
-            return frames_picked;
         }
     }
 
@@ -853,14 +884,14 @@ class Master
         // FFMPEG Executable
         // Check if the file exsists
         /*Show_Top_Bar();
-        Console.WriteLine("Where is your FFMPEG executable stored? (if you don't want to use FFMPEG just leave this empty)");
+    Console.WriteLine("Where is your FFMPEG executable stored? (if you don't want to use FFMPEG just leave this empty)");
+    user_input = Console.ReadLine().Replace("\"", "");
+    while (!File.Exists(user_input) && user_input != "")
+    {
+        Console.WriteLine("Please input the path to your FFMPEG executable");
         user_input = Console.ReadLine().Replace("\"", "");
-        while (!File.Exists(user_input) && user_input != "")
-        {
-            Console.WriteLine("Please input the path to your FFMPEG executable");
-            user_input = Console.ReadLine().Replace("\"", "");
-        }
-        new_settings.ffmpeg_executable = user_input;*/
+    }
+    new_settings.ffmpeg_executable = user_input;*/
 
         // Allow computation
         // Use Menu() to grab user input
@@ -879,14 +910,14 @@ class Master
             basic_bool,
             "Master",
             new List<string> { "Save debug data? (it is only stored locally)",
-                               "You can find a list of all the data stored in the documentation" }
+                "You can find a list of all the data stored in the documentation" }
         );
         Settings.Allow_Data_Collection = Helpers.Parse_Bool(menu.Show());
 
         Logger.Initialize(Settings.Enable_Logging, Settings.Log_level);
 
         // Save the settings
-        Settings_File_Handler.Save_Settings(Settings);
+        FileHandler.Save_Object(Settings);
 
         Display.Show_Top_Bar("Master");
         Console.WriteLine("Setup complete!");
@@ -950,7 +981,7 @@ class Master
             basic_bool,
             "Master",
             new List<string> { "Render a test frame? (Will take some time)",
-                               "Used for Client time limit and analytics." }
+                "Used for Client time limit and analytics." }
         );
         Project.Render_Test_Frame = Helpers.Parse_Bool(menu.Show());
 
@@ -971,78 +1002,78 @@ class Master
 
         // Only required if we generate a video
         /*if (Project.Video_Generate)
+    {
+        // Video FPS
+        // Let user input a valid value
+        Display.Show_Top_Bar("Master");
+        Console.WriteLine("Video frames per second: (Default: 24)");
+        user_input = Console.ReadLine();
+        while (!int.TryParse(user_input, out _))
         {
-            // Video FPS
-            // Let user input a valid value
-            Display.Show_Top_Bar("Master");
-            Console.WriteLine("Video frames per second: (Default: 24)");
+            if (user_input == "")
+            {
+                user_input = "24";
+                break;
+            }
+
+            Console.WriteLine("Please input a whole number");
+            user_input = Console.ReadLine();
+        }
+        Project.Video_FPS = Math.Abs(int.Parse(user_input));
+        Console.Clear();
+
+        // Video rate control type
+        // Use Menu() to grab user input
+        Project.Video_Rate_Control = Menu(new List<string> { "CRF", "CBR" },
+                                              new List<string> { "What Video Rate Control to use?" });
+
+        // Video rate control value (e.g. bitrate)
+        // Let user input a valid value
+        Display.Show_Top_Bar("Master");
+        Console.WriteLine("Video Rate Control Value: (CRF - lower is better; CBR - higher is better)");
+        user_input = Console.ReadLine();
+        while (!int.TryParse(user_input, out _))
+        {
+            Console.WriteLine("Please input a whole number");
+            user_input = Console.ReadLine();
+        }
+        Project.Video_Rate_Control_Value = Math.Abs(int.Parse(user_input));
+        Console.Clear();
+
+        // Resize the video
+        // Use Menu() to grab user input
+        Project.Video_Resize = Helpers.Parse_Bool(Menu(new List<string> { "Yes", "No" },
+                                                   new List<string> { "Rescale the video?" }));
+
+        if (new_project.video_resize)
+        {
+            // New video witdh/x
+            // Let user input a valid resolution
+            Show_Top_Bar();
+            Console.WriteLine("New video width:");
             user_input = Console.ReadLine();
             while (!int.TryParse(user_input, out _))
             {
-                if (user_input == "")
-                {
-                    user_input = "24";
-                    break;
-                }
-
                 Console.WriteLine("Please input a whole number");
                 user_input = Console.ReadLine();
             }
-            Project.Video_FPS = Math.Abs(int.Parse(user_input));
+            new_project.video_x = Math.Abs(int.Parse(user_input));
             Console.Clear();
 
-            // Video rate control type
-            // Use Menu() to grab user input
-            Project.Video_Rate_Control = Menu(new List<string> { "CRF", "CBR" },
-                                                  new List<string> { "What Video Rate Control to use?" });
-
-            // Video rate control value (e.g. bitrate)
-            // Let user input a valid value
-            Display.Show_Top_Bar("Master");
-            Console.WriteLine("Video Rate Control Value: (CRF - lower is better; CBR - higher is better)");
+            // New video height/y
+            // Let user input a valid resolution
+            Show_Top_Bar();
+            Console.WriteLine("New video height:");
             user_input = Console.ReadLine();
             while (!int.TryParse(user_input, out _))
             {
                 Console.WriteLine("Please input a whole number");
                 user_input = Console.ReadLine();
             }
-            Project.Video_Rate_Control_Value = Math.Abs(int.Parse(user_input));
+            new_project.video_y = Math.Abs(int.Parse(user_input));
             Console.Clear();
-
-            // Resize the video
-            // Use Menu() to grab user input
-            Project.Video_Resize = Helpers.Parse_Bool(Menu(new List<string> { "Yes", "No" },
-                                                       new List<string> { "Rescale the video?" }));
-
-            if (new_project.video_resize)
-            {
-                // New video witdh/x
-                // Let user input a valid resolution
-                Show_Top_Bar();
-                Console.WriteLine("New video width:");
-                user_input = Console.ReadLine();
-                while (!int.TryParse(user_input, out _))
-                {
-                    Console.WriteLine("Please input a whole number");
-                    user_input = Console.ReadLine();
-                }
-                new_project.video_x = Math.Abs(int.Parse(user_input));
-                Console.Clear();
-
-                // New video height/y
-                // Let user input a valid resolution
-                Show_Top_Bar();
-                Console.WriteLine("New video height:");
-                user_input = Console.ReadLine();
-                while (!int.TryParse(user_input, out _))
-                {
-                    Console.WriteLine("Please input a whole number");
-                    user_input = Console.ReadLine();
-                }
-                new_project.video_y = Math.Abs(int.Parse(user_input));
-                Console.Clear();
-            }
-        }*/
+        }
+    }*/
 
         // Blender version
         // Use Menu() to grab user input
@@ -1110,7 +1141,7 @@ class Master
             Initialize_Project();
 
             // Save the project
-            ProjectFileHandler.Save_Project(Project, Path.Join(Project_Directory, $"{Project.ID}.prfp"));
+            FileHandler.Save_Object(Project, Path.Join(Project_Directory, $"{Project.ID}.prfp"));
 
             // Start rendering
             Render_Project();
@@ -1125,26 +1156,30 @@ class Master
     {
         lock (Project_DB_Lock)
         {
-            DBHandler.Initialize_Project_Table(Project.ID);
-
-            // Append every frame to frames_left
-            Project.Frames_Total = DBHandler.Insert_Frames_Table(Project.First_Frame, Project.Last_Frame, Project.Frame_Step);
-
-            // If the file exsists add it to list
-            string file = $"frame_{Project.First_Frame.ToString().PadLeft(6, '0')}.{Project.Output_File_Format}";
-            string path = Path.Join(Path.GetDirectoryName(Project.Full_Path_Blend), file);
-            if (File.Exists(path))
+            using (DatabaseHandler db = new DatabaseHandler())
             {
-                File.Move(path, Path.Join(Project_Directory, file));
+                DatabaseHandler.Project_ID = Project.ID;
+                db.Initialize_Database();
 
-                DBHandler.Update_Frames_Table(new List<Frame>
+                // Append every frame to frames_left
+                Project.Frames_Total = db.Insert_Frames_In_Range(Project.First_Frame, Project.Last_Frame, Project.Frame_Step);
+
+                // If the file exsists add it to list
+                string file = $"frame_{Project.First_Frame.ToString().PadLeft(6, '0')}.{Project.Output_File_Format}";
+                string path = Path.Join(Path.GetDirectoryName(Project.Full_Path_Blend), file);
+                if (File.Exists(path))
                 {
-                    new Frame
+                    File.Move(path, Path.Join(Project_Directory, file));
+
+                    db.Update_Frames(new List<Frame>
                     {
-                        Id = Project.First_Frame,
-                        State = "Rendered"
-                    }
-                });
+                        new Frame
+                        {
+                            Id = Project.First_Frame,
+                            State = FrameState.Rendered
+                        }
+                    });
+                }
             }
 
             #region Prepare project on remote directory
@@ -1163,7 +1198,7 @@ class Master
                 try
                 {
                     File.Copy(Project.Full_Path_Blend,
-                              Path.Join(Settings.SMB_Connection.Connection_String, Project.Full_Path_Blend));
+                        Path.Join(Settings.SMB_Connection.Connection_String, Project.Full_Path_Blend));
                 }
                 catch (Exception ex)
                 {
@@ -1177,8 +1212,8 @@ class Master
                     Web_Client = new WebClient();
                     //Web_Client.Credentials = new NetworkCredential(Settings.FTP_Connection.User, Settings.FTP_Connection.Password);
                     Web_Client.UploadFile(Path.Join(Settings.FTP_Connection.Connection_String, Project.Full_Path_Blend),
-                                          WebRequestMethods.Ftp.UploadFile,
-                                          Project.Full_Path_Blend);
+                        WebRequestMethods.Ftp.UploadFile,
+                        Project.Full_Path_Blend);
                 }
                 catch (Exception ex)
                 {

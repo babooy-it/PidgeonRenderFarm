@@ -14,7 +14,7 @@ public class ProjectInfo
 }
 
 // Project object class
-public class Project
+public class Project : SavableObject
 {
     public string ID { get; set; }
     public string Blender_Version { get; set; }

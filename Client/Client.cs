@@ -1,33 +1,31 @@
-﻿using System.Net;
+﻿using System.Diagnostics;
+using System.IO.Compression;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Diagnostics;
 using System.Text.Json;
-using System.IO.Compression;
-
 using Libraries;
+using Libraries.Enums;
 using Libraries.Models;
 using Libraries.Models.Database;
-using Libraries.Enums;
+using LinqToDB;
+
+namespace Client;
 
 class Client
 {
     #region Global Variables
     // Initialize global variables
     // Initialize global File names, directories
-    public static string Bin_Directory = AppDomain.CurrentDomain.BaseDirectory;
+    public static readonly string Bin_Directory = AppDomain.CurrentDomain.BaseDirectory;
     public static string Database_Directory = "";
     public static string Project_Directory = "";
 
     // Create global objects and variables
-    public static string IP_Address_String = "127.0.0.1";
     public static ClientSettings Settings;
-    private static object Log_DB_Lock = new object();
     public static ProgressBar Progress_Bar;
 
-    public static WebClient Web_Client;
-
-    private static SettingsFileHandler Settings_File_Handler;
+    public static WebClient Web_Client = new WebClient();
     #endregion
 
     // Runs at start
@@ -45,10 +43,10 @@ class Client
             Directory.CreateDirectory(Database_Directory);
         }
 
-        Settings_File_Handler = new SettingsFileHandler(Path.Join(Bin_Directory, "client_settings.json"));
         try
         {
-            Settings = Settings_File_Handler.Load_Client_Settings();
+            Settings = new();
+            Settings = FileHandler.Load_To_Object<ClientSettings>(Path.Join(Bin_Directory, Settings.GetType().Name + ".json"));
         }
         catch (FileNotFoundException)
         {
@@ -62,9 +60,14 @@ class Client
         }
 
         Logger.Initialize(Settings.Enable_Logging, Settings.Log_level);
-        DBHandler.Initialize(Settings.Database_Connection);
 
-        new SystemInfo(Settings.Allow_Data_Collection, Bin_Directory);
+        using (DatabaseHandler db = new DatabaseHandler(new DataOptions()
+                   .UseSQLite($"Data Source={Path.Join(Settings.Database_Connection.Path, "PRF.db")}")))
+        {
+            db.Initialize_Logging();
+        }
+
+        new SystemInfo(Settings.Allow_Data_Collection);
 
         Main_Menu();
     }
@@ -284,7 +287,6 @@ class Client
 
                                 else if (master_response.File_transfer_Mode == FileTransferMode.FTP)
                                 {
-                                    Web_Client = new WebClient();
                                     //Web_Client.Credentials = new NetworkCredential(Settings.FTP_Connection.User, Settings.FTP_Connection.Password);
                                     Web_Client.DownloadFile(Path.Join(master_response.Connection_String, (master_response.ID + ".blend")), blend_file);
 
@@ -317,18 +319,18 @@ class Client
                             if (master_response.Use_SID_Temporal)
                             {
                                 Render_SID_Temporal(blend_file,
-                                                   master_response.Frames.First().Id,
-                                                   master_response.Frames.Last().Id,
-                                                   master_response.Frame_Step,
-                                                   master_response.Render_Engine);
+                                    master_response.Frames.First().Id,
+                                    master_response.Frames.Last().Id,
+                                    master_response.Frame_Step,
+                                    master_response.Render_Engine);
                             }
                             else
                             {
                                 Render(blend_file,
-                                       master_response.Frames.First().Id,
-                                       master_response.Frames.Last().Id,
-                                       master_response.Render_Engine,
-                                       master_response.File_Format);
+                                    master_response.Frames.First().Id,
+                                    master_response.Frames.Last().Id,
+                                    master_response.Render_Engine,
+                                    master_response.File_Format);
                             }
 
                             Logger.Log(this, $"Frame {master_response.Frames.First().Id} - {master_response.Frames.Last().Id} rendered!");
@@ -630,7 +632,7 @@ class Client
             basic_bool,
             "Client",
             new List<string> { "Keep the files reiceved by the Master?",
-                               "If this is disabled, the Client will redownload the project every time" }
+                "If this is disabled, the Client will redownload the project every time" }
         );
         Settings.Keep_Input = Helpers.Parse_Bool(menu.Show());
 
@@ -639,7 +641,7 @@ class Client
             basic_bool,
             "Client",
             new List<string> { "Keep the rendered files?",
-                               "If this is disabled, the Client will delete all rendered files after sending them to the master" }
+                "If this is disabled, the Client will delete all rendered files after sending them to the master" }
         );
         Settings.Keep_Output = Helpers.Parse_Bool(menu.Show());
 
@@ -648,7 +650,7 @@ class Client
             basic_bool,
             "Client",
             new List<string> { "Keep the ZIP files?",
-                               "If this is disabled, the Client will delete all ZIP files after sending them to the master" }
+                "If this is disabled, the Client will delete all ZIP files after sending them to the master" }
         );
         Settings.Keep_ZIP = Helpers.Parse_Bool(menu.Show());
 
@@ -679,7 +681,7 @@ class Client
             else if (Helpers.Check_Split_IP_Port(user_input))
             {
                 string[] split = user_input.Split(':');
-                Settings.Master_Connections.Add(new MasterConnection(split[0], int.Parse(split[1])));
+                Settings.Master_Connections.Add(new MasterConnection(split[0], ushort.Parse(split[1])));
 
                 Console.WriteLine("Would you like to add another Master? (leave empty for no; paste the connection string for yes)");
             }
@@ -759,12 +761,12 @@ class Client
             basic_bool,
             "Client",
             new List<string> { "Save debug data? (it is only stored locally)",
-                               "You can find a list of all the data stored in the documentation" }
+                "You can find a list of all the data stored in the documentation" }
         );
         Settings.Allow_Data_Collection = Helpers.Parse_Bool(menu.Show());
 
         // Save the settings
-        Settings_File_Handler.Save_Settings(Settings);
+        FileHandler.Save_Object(Settings);
 
         Display.Show_Top_Bar("Client");
         Console.WriteLine("Setup complete!");

@@ -1,10 +1,15 @@
-﻿namespace Libraries.Models.Database;
+﻿using Libraries.Enums;
+using LinqToDB.Mapping;
+
+namespace Libraries.Models.Database;
 
 public class Frame
 {
-    public int Id {  get; set; }
+    [PrimaryKey, Identity]
+    public int Id { get; set; }
+    public int Number { get; set; }
     public string? File_Name { get; set; }
-    public string State { get; set; }
+    public FrameState State { get; set; }
     public bool Quality { get; set; }
     public string IPv4 { get; set; }
 }

@@ -1,4 +1,6 @@
 ﻿using Libraries.Enums;
+using Libraries.Models.Database;
+using LinqToDB;
 
 namespace Libraries;
 
@@ -81,6 +83,18 @@ public static class Logger
             Console.ForegroundColor = Default_Foreground_Color;
             Console.BackgroundColor = Default_Background_Color;
         }
-        DBHandler.Insert_Log_Table(DateTime.Now.ToString(), level, module.ToString(), message);
+
+        using (DatabaseHandler db = new DatabaseHandler())
+        {
+            LogEntry entry = new LogEntry
+            {
+                Time = DateTime.Now,
+                Level = level,
+                Module = module.ToString(),
+                Message = message
+            };
+
+            db.Insert_Log(entry);
+        }
     }
 }
